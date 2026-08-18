@@ -35,9 +35,9 @@
 
         <div class="content">
             <div class="dim-panel">
-                <div class="dim-tile"><div class="value" id="val-length">—</div><div class="label">Длина, мм</div></div>
-                <div class="dim-tile"><div class="value" id="val-width">—</div><div class="label">Ширина, мм</div></div>
                 <div class="dim-tile"><div class="value" id="val-height">—</div><div class="label">Высота, мм</div></div>
+                <div class="dim-tile"><div class="value" id="val-width">—</div><div class="label">Ширина, мм</div></div>
+                <div class="dim-tile"><div class="value" id="val-depth">—</div><div class="label">Глубина, мм</div></div>
                 <div class="dim-tile"><div class="value" id="val-weight">—</div><div class="label">Вес</div></div>
             </div>
             <p id="cross-check-line" style="color:var(--text-secondary)"></p>
@@ -72,9 +72,9 @@ async function poll() {
         badge.textContent = s.stable ? 'stable' : s.status;
         badge.className = 'badge ' + (s.stable ? 'running' : s.status);
 
-        document.getElementById('val-length').textContent = fmt(s.length_mm);
-        document.getElementById('val-width').textContent = fmt(s.width_mm);
         document.getElementById('val-height').textContent = fmt(s.height_mm);
+        document.getElementById('val-width').textContent = fmt(s.width_mm);
+        document.getElementById('val-depth').textContent = fmt(s.depth_mm);
 
         const w = s.weight;
         document.getElementById('val-weight').textContent =

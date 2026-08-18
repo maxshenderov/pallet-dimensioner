@@ -20,22 +20,22 @@ def test_build_payload_includes_only_available_fields():
     payload = build_payload(_post(), state)
 
     assert payload["post_id"] == "post-04"
-    assert "length_mm" not in payload
+    assert "height_mm" not in payload
     assert "weight" not in payload
 
 
 def test_build_payload_includes_full_measurement():
     state = PostState(
         post_id="post-04", status=PostStatus.running, stable=True,
-        length_mm=1195.4, width_mm=800.1, height_mm=1487.0, cross_check_passed=True,
+        height_mm=1487.0, width_mm=1195.4, depth_mm=800.1, cross_check_passed=True,
         weight=WeightReading(ok=True, value=820.5, unit="kg", stable=True),
         updated_at=datetime(2026, 8, 18, 10, 23, 41, tzinfo=timezone.utc),
     )
     payload = build_payload(_post(), state)
 
-    assert payload["length_mm"] == 1195
-    assert payload["width_mm"] == 800
     assert payload["height_mm"] == 1487
+    assert payload["width_mm"] == 1195
+    assert payload["depth_mm"] == 800
     assert payload["cross_check_passed"] is True
     assert payload["weight"] == 820.5
     assert payload["weight_unit"] == "kg"
@@ -49,7 +49,7 @@ def test_build_payload_skips_weight_when_scale_offline():
 
 
 def test_generate_png_returns_valid_png_bytes():
-    state = PostState(post_id="post-04", length_mm=1200, width_mm=800, height_mm=1450)
+    state = PostState(post_id="post-04", height_mm=1450, width_mm=1200, depth_mm=800)
     png = generate_png(_post(), state)
 
     assert png.startswith(PNG_MAGIC)

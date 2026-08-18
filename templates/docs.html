@@ -104,8 +104,8 @@ http://localhost:8012/posts</code></pre>
             <div class="endpoint">
                 <span class="method get">GET</span><code>/api/posts/{id}/state</code>
                 <p>Текущее состояние: <code>status</code> (<code>running</code> / <code>camera_offline</code> /
-                <code>calibration_lost</code> / <code>stopped</code>), <code>length_mm</code>/<code>width_mm</code>/
-                <code>height_mm</code>, <code>cross_check_passed</code>, <code>stable</code>, <code>weight</code>.</p>
+                <code>calibration_lost</code> / <code>stopped</code>), <code>height_mm</code>/<code>width_mm</code>/
+                <code>depth_mm</code>, <code>cross_check_passed</code>, <code>stable</code>, <code>weight</code>.</p>
             </div>
             <div class="endpoint">
                 <span class="method get">GET</span><code>/posts/{id}/stream/top</code>,
@@ -129,9 +129,9 @@ http://localhost:8012/posts</code></pre>
             <pre><code>{
   "post_id": "post-04",
   "post_name": "Пост 04",
-  "length_mm": 1195,
-  "width_mm": 800,
   "height_mm": 1487,
+  "width_mm": 1195,
+  "depth_mm": 800,
   "cross_check_passed": true,
   "weight": 820.5,
   "weight_unit": "kg",

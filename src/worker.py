@@ -15,7 +15,18 @@ from .calibration.camera_calibrate import load_intrinsics, undistort
 from .capture.camera_stream import CameraStream, CameraUnavailableError, get_synchronized_frames
 from .integration.api_client import send_measurement
 from .models import MeasurementEvent, Post, PostState, PostStatus, WeightReading
-from .vision.dimensions import compute_footprint_mm, compute_height_and_side_mm, correct_perspective, cross_check
+from .vision.dimensions import cross_check
+from .vision.perspective import (
+    camera_nadir_mm,
+    contour_to_floor_mm,
+    focal_length_px_from_markers,
+    footprint_mm_without_side_faces,
+    height_looks_inflated,
+    height_mm_from_near_face,
+    lens_depth_mm,
+    object_distances_mm,
+    width_mm_from_pinhole,
+)
 from .vision.segmentation import segment_pallet
 from .vision.stabilizer import MeasurementStabilizer
 
@@ -38,6 +49,7 @@ class PostWorker:
         self._lock = threading.Lock()
         self._state = PostState(post_id=post.id)
         self._frames: dict[str, bytes] = {}
+        self._ema: dict[str, float] = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -73,6 +85,15 @@ class PostWorker:
     def _set_state(self, **kwargs) -> None:
         with self._lock:
             self._state = self._state.model_copy(update={**kwargs, "updated_at": _now()})
+
+    def _smooth(self, key: str, value: float) -> float:
+        """Экспоненциальное сглаживание кадр-к-кадру. Используется и для отображения, и как
+        вход стабилизатора — иначе шум сегментации (пиксельное дрожание контура) не даёт
+        stddev-окну сойтись, и статус "stable" не наступает, даже когда объект неподвижен."""
+        prev = self._ema.get(key)
+        smoothed = value if prev is None else 0.3 * value + 0.7 * prev
+        self._ema[key] = smoothed
+        return smoothed
 
     def _set_frame(self, camera: str, frame) -> None:
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -140,15 +161,22 @@ class PostWorker:
         if intrinsics_side is not None:
             frame_side = undistort(frame_side, intrinsics_side)
 
-        self._set_frame("top", frame_top)
-        self._set_frame("side", frame_side)
         weight = self._fetch_weight()
 
         homography_top = compute_homography(detect_markers(frame_top), post.camera_top.aruco_marker_positions_mm)
-        homography_side = compute_homography(detect_markers(frame_side), post.camera_side.aruco_marker_positions_mm)
+        # Боковой камере гомография не нужна: её масштаб зависит от расстояния до объекта и
+        # пересчитывается на каждом кадре. От маркеров 5/6 нужно только фокусное расстояние.
+        focal_side = focal_length_px_from_markers(
+            detect_markers(frame_side),
+            post.camera_side.aruco_marker_positions_mm,
+            post.camera_side.reference_distance_mm,
+        )
 
-        if homography_top is None or homography_side is None:
+        if homography_top is None or focal_side is None:
             stabilizer.reset()
+            self._ema.clear()
+            self._set_frame("top", _draw_overlay(frame_top, None, ["Калибровка потеряна: не видны маркеры"]))
+            self._set_frame("side", _draw_overlay(frame_side, None, ["Калибровка потеряна: не видны маркеры"]))
             self._set_state(status=PostStatus.calibration_lost, weight=weight, stable=False)
             time.sleep(CALIBRATION_LOST_RETRY_SECONDS)
             return
@@ -166,38 +194,88 @@ class PostWorker:
 
         if contour_top is None or contour_side is None:
             stabilizer.reset()
+            self._ema.clear()
+            self._set_frame("top", _draw_overlay(frame_top, contour_top, ["Объект не найден"]))
+            self._set_frame("side", _draw_overlay(frame_side, contour_side, ["Объект не найден"], post.camera_side.floor_line_px))
             self._set_state(status=PostStatus.running, weight=weight, stable=False,
-                             length_mm=None, width_mm=None, height_mm=None, cross_check_passed=None)
+                             width_mm=None, depth_mm=None, height_mm=None, cross_check_passed=None)
             return
 
-        footprint = compute_footprint_mm(contour_top, homography_top)
-        height, side = compute_height_and_side_mm(contour_side, homography_side, post.camera_side.floor_line_px)
-        length, width = correct_perspective(
-            footprint, height, post.camera_top.mount_height_mm, post.camera_top.mount_height_mm
+        # Верхняя камера даёт не только footprint, но и положение объекта в мм на полу —
+        # отсюда расстояние до боковой камеры, а значит и её масштаб именно для этого объекта.
+        side_cfg = post.camera_side
+        floor_points = contour_to_floor_mm(contour_top, homography_top)
+        near_mm, _far_mm = object_distances_mm(
+            floor_points,
+            lens_depth_mm(side_cfg.markers_depth_mm, side_cfg.reference_distance_mm, side_cfg.depth_sign),
+            side_cfg.depth_axis,
         )
-        passed = cross_check((length, width), side, post.cross_check_tolerance_mm)
+        _, top_px, width_px, height_px = cv2.boundingRect(contour_side)
+        height = height_mm_from_near_face(top_px, top_px + height_px, near_mm, focal_side)
+        side = width_mm_from_pinhole(width_px, near_mm, focal_side)
 
-        stabilizer.add_sample(length, width, height)
+        if height_looks_inflated(height, side_cfg.lens_height_mm):
+            logger.warning(
+                "Пост %s: объект (%.0f мм) ниже объектива боковой камеры (%.0f мм) — "
+                "камере видна верхняя грань, высота завышена. Опустите камеру.",
+                post.id, height, side_cfg.lens_height_mm,
+            )
+
+        width, depth = footprint_mm_without_side_faces(
+            floor_points,
+            camera_nadir_mm(homography_top, (frame_top.shape[1], frame_top.shape[0])),
+            height,
+            post.camera_top.mount_height_mm,
+        )
+        passed = cross_check((width, depth), side, post.cross_check_tolerance_mm)
+
+        width_disp = self._smooth("width", width)
+        depth_disp = self._smooth("depth", depth)
+        height_disp = self._smooth("height", height)
+
+        self._set_frame("top", _draw_overlay(
+            frame_top, contour_top, [f"Ширина: {width_disp:.0f} мм", f"Глубина: {depth_disp:.0f} мм"],
+        ))
+        self._set_frame("side", _draw_overlay(
+            frame_side, contour_side, [f"Высота: {height_disp:.0f} мм"], post.camera_side.floor_line_px,
+        ))
+
+        stabilizer.add_sample(width_disp, depth_disp, height_disp)
         is_stable = stabilizer.is_stable()
 
         self._set_state(
             status=PostStatus.running, weight=weight, stable=is_stable,
-            length_mm=length, width_mm=width, height_mm=height, cross_check_passed=passed,
+            width_mm=width_disp, depth_mm=depth_disp, height_mm=height_disp, cross_check_passed=passed,
         )
 
         if is_stable:
             result = stabilizer.get_stable_result()
             if post.wms_endpoint:
-                delta_mm = min(abs(length - side), abs(width - side))
+                delta_mm = min(abs(width - side), abs(depth - side))
                 event = MeasurementEvent(
                     post_id=post.id, timestamp=_now(),
-                    length_mm=result.length_mm, width_mm=result.width_mm, height_mm=result.height_mm,
+                    height_mm=result.height_mm, width_mm=result.length_mm, depth_mm=result.width_mm,
                     cross_check_passed=passed, cross_check_delta_mm=delta_mm, samples_count=result.samples_count,
                 )
                 send_measurement(event, post.wms_endpoint, pending_events_dir=f"data/posts/{post.id}/pending_events")
-                logger.info("Пост %s: измерение отправлено в WMS L=%.0f W=%.0f H=%.0f",
+                logger.info("Пост %s: измерение отправлено в WMS Ш=%.0f Г=%.0f В=%.0f",
                             post.id, result.length_mm, result.width_mm, result.height_mm)
             stabilizer.reset()
+
+
+def _draw_overlay(frame, contour, lines: list[str], floor_line_px: int | None = None):
+    """Рисует на кадре рамку найденного контура, текст с габаритами и (для side) линию пола."""
+    out = frame.copy()
+    if contour is not None:
+        x, y, w, h = cv2.boundingRect(contour)
+        cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    if floor_line_px is not None:
+        cv2.line(out, (0, floor_line_px), (out.shape[1], floor_line_px), (0, 165, 255), 1)
+    y0 = 36
+    for line in lines:
+        cv2.putText(out, line, (12, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
+        y0 += 36
+    return out
 
 
 def _now() -> datetime:

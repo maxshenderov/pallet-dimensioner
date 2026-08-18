@@ -14,9 +14,9 @@ def _event() -> MeasurementEvent:
     return MeasurementEvent(
         post_id="POST-TEST",
         timestamp=datetime(2026, 8, 18, 10, 23, 41, tzinfo=timezone.utc),
-        length_mm=1195,
-        width_mm=800,
         height_mm=1487,
+        width_mm=1195,
+        depth_mm=800,
         cross_check_passed=True,
         cross_check_delta_mm=8,
         samples_count=12,

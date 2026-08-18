@@ -15,12 +15,12 @@ def build_payload(post: Post, state: PostState) -> dict:
         "post_id": post.id,
         "post_name": post.name,
     }
-    if state.length_mm is not None:
-        payload["length_mm"] = round(state.length_mm)
-    if state.width_mm is not None:
-        payload["width_mm"] = round(state.width_mm)
     if state.height_mm is not None:
         payload["height_mm"] = round(state.height_mm)
+    if state.width_mm is not None:
+        payload["width_mm"] = round(state.width_mm)
+    if state.depth_mm is not None:
+        payload["depth_mm"] = round(state.depth_mm)
     if state.cross_check_passed is not None:
         payload["cross_check_passed"] = state.cross_check_passed
     if state.weight and state.weight.ok and state.weight.value is not None:

@@ -14,9 +14,9 @@ class MeasurementEvent(BaseModel):
 
     post_id: str
     timestamp: datetime
-    length_mm: float
-    width_mm: float
     height_mm: float
+    width_mm: float
+    depth_mm: float
     cross_check_passed: bool
     cross_check_delta_mm: float
     samples_count: int = Field(gt=0)
@@ -142,11 +142,26 @@ class CameraTopBinding(CameraBinding):
 
 
 class CameraSideBinding(CameraBinding):
+    """Боковая камера. Геометрические поля замеряются рулеткой ОДИН раз при установке поста —
+    дальше масштаб пересчитывается под каждый объект по расстоянию с верхней камеры
+    (см. vision/perspective.py), и переставлять маркеры под разные паллеты не нужно."""
+
     aruco_marker_ids: list[int] = Field(default_factory=lambda: [5, 6])
     aruco_marker_positions_mm: dict[int, tuple[float, float]] = Field(
         default_factory=lambda: dict(DEFAULT_SIDE_MARKER_POSITIONS_MM)
     )
+    # Расстояние от объектива до калибровочных маркеров 5/6. Задаёт масштаб всей боковой камеры.
     reference_distance_mm: float = 2500.0
+    # Высота объектива над полом. В расчёт не входит: объектив должен стоять НИЖЕ самого низкого
+    # измеряемого объекта, и тогда высота считается по передней грани без этого числа. Нужна
+    # только чтобы предупредить в логе, когда требование нарушено и высота завышается.
+    lens_height_mm: float = 200.0
+    # Координата маркеров 5/6 вдоль оси глубины в системе координат пола (её задаёт верхняя камера).
+    markers_depth_mm: float = 0.0
+    # Какая ось пола направлена от камеры вглубь сцены и растёт ли она по мере удаления.
+    depth_axis: Literal["x", "y"] = "y"
+    depth_sign: Literal[1, -1] = 1
+    # Больше не участвует в расчёте высоты — остаётся только линией-ориентиром на видео.
     floor_line_px: int = 980
 
 
@@ -202,9 +217,9 @@ class PostState(BaseModel):
 
     post_id: str
     status: PostStatus = PostStatus.stopped
-    length_mm: float | None = None
-    width_mm: float | None = None
     height_mm: float | None = None
+    width_mm: float | None = None
+    depth_mm: float | None = None
     cross_check_passed: bool | None = None
     stable: bool = False
     weight: WeightReading | None = None

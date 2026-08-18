@@ -32,9 +32,9 @@ def build_event(config: PostConfig, result: MeasurementResult, passed: bool, del
     return MeasurementEvent(
         post_id=config.post_id,
         timestamp=datetime.now(timezone.utc),
-        length_mm=result.length_mm,
-        width_mm=result.width_mm,
         height_mm=result.height_mm,
+        width_mm=result.length_mm,
+        depth_mm=result.width_mm,
         cross_check_passed=passed,
         cross_check_delta_mm=delta_mm,
         samples_count=result.samples_count,
@@ -116,7 +116,7 @@ def run(config_path: str | Path = "config/post_config.yaml") -> None:
                 config.network.pending_events_dir,
             )
             logger.info(
-                "Измерение отправлено: L=%.0f W=%.0f H=%.0f cross_check=%s",
+                "Измерение отправлено: Ш=%.0f Г=%.0f В=%.0f cross_check=%s",
                 result.length_mm, result.width_mm, result.height_mm, passed,
             )
             stabilizer.reset()

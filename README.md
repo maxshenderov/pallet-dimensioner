@@ -113,9 +113,9 @@ pytest -q
 {
   "post_id": "post-04",
   "post_name": "Пост 04",
-  "length_mm": 1195,
-  "width_mm": 800,
   "height_mm": 1487,
+  "width_mm": 1195,
+  "depth_mm": 800,
   "cross_check_passed": true,
   "weight": 820.5,
   "weight_unit": "kg",
@@ -129,9 +129,9 @@ pytest -q
 {
   "post_id": "POST-04",
   "timestamp": "2026-08-18T10:23:41Z",
-  "length_mm": 1195,
-  "width_mm": 800,
   "height_mm": 1487,
+  "width_mm": 1195,
+  "depth_mm": 800,
   "cross_check_passed": true,
   "cross_check_delta_mm": 8,
   "samples_count": 12,

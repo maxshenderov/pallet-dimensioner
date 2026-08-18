@@ -28,6 +28,12 @@ def segment_pallet(
     background_mask = cv2.inRange(hsv, np.array(background_hsv_lower), np.array(background_hsv_upper))
     object_mask = cv2.bitwise_not(background_mask)
 
+    # open убирает мелкий шум (блики, зернистость), close закрывает мелкие дыры внутри
+    # объекта — без этого контур дрожит от кадра к кадру даже при неподвижном объекте.
+    kernel = np.ones((7, 7), np.uint8)
+    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
+    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
+
     contours, _ = cv2.findContours(object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
