@@ -1,8 +1,15 @@
 """Захват кадров с двух камер, синхронизированный по минимальному временному разрыву."""
 from __future__ import annotations
 
+import sys
+
 import cv2
 import numpy as np
+
+# На Windows дефолтный backend (MSMF) может открываться ~10с и не захватывать кадр при
+# конфликте с DirectShow-хендлом; DSHOW открывается мгновенно и стабильно. На Linux (реальный
+# пост, V4L2) дефолтный backend работает штатно — трогать не нужно.
+_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
 
 
 class CameraUnavailableError(Exception):
@@ -14,7 +21,7 @@ class CameraStream:
 
     def __init__(self, camera_id: int, resolution: tuple[int, int]):
         self.camera_id = camera_id
-        self._cap = cv2.VideoCapture(camera_id)
+        self._cap = cv2.VideoCapture(camera_id, _BACKEND)
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
         if not self._cap.isOpened():
