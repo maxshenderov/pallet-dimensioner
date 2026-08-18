@@ -1,0 +1,43 @@
+post_id: "POST-04"
+api_endpoint: "http://wms-backend.local:8000/api/v1/pallet-measurements"
+
+camera_top:
+  device_id: 0
+  resolution: [1920, 1080]
+  mount_height_mm: 3200
+  roi: [280, 200, 1600, 950]
+  aruco_marker_ids: [1, 2, 3, 4]
+  aruco_marker_positions_mm:
+    1: [0, 0]
+    2: [1200, 0]
+    3: [1200, 800]
+    4: [0, 800]
+  background_hsv_lower: [0, 0, 0]
+  background_hsv_upper: [180, 60, 90]
+  min_contour_area_px: 5000
+
+camera_side:
+  device_id: 1
+  resolution: [1920, 1080]
+  reference_distance_mm: 2500
+  floor_line_px: 980
+  roi: [100, 50, 1800, 1000]
+  aruco_marker_ids: [5, 6]
+  aruco_marker_positions_mm:
+    5: [0, 0]
+    6: [1000, 0]
+  background_hsv_lower: [0, 0, 0]
+  background_hsv_upper: [180, 60, 90]
+  min_contour_area_px: 5000
+
+stabilizer:
+  window_size: 12
+  stddev_threshold_mm: 15
+
+cross_check:
+  tolerance_mm: 30
+
+network:
+  retry_attempts: 5
+  retry_backoff_seconds: 2
+  pending_events_dir: "data/pending_events"

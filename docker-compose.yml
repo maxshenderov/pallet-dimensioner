@@ -1,0 +1,13 @@
+services:
+  pallet-dimensioner:
+    build: .
+    container_name: pallet-dimensioner
+    devices:
+      - "${CAMERA_TOP_DEVICE:-/dev/video0}:/dev/video0"
+      - "${CAMERA_SIDE_DEVICE:-/dev/video1}:/dev/video1"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

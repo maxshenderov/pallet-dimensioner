@@ -1,0 +1,16 @@
+[Unit]
+Description=Pallet Dimensioner - dual webcam pallet dimension measurement
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pallet-dimensioner
+ExecStart=/opt/pallet-dimensioner/venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+User=pallet
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

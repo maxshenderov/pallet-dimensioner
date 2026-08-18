@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+config/camera_intrinsics_*.json
+data/pending_events/
+.venv/
+.env
