@@ -2,6 +2,8 @@ services:
   pallet-dimensioner:
     build: .
     container_name: pallet-dimensioner
+    ports:
+      - "${SERVER_PORT:-8012}:8012"
     devices:
       - "${CAMERA_TOP_DEVICE:-/dev/video0}:/dev/video0"
       - "${CAMERA_SIDE_DEVICE:-/dev/video1}:/dev/video1"
@@ -11,3 +13,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

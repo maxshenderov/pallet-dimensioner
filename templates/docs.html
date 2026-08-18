@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pallet-dimensioner — Documentation</title>
+    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+    <link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <img src="/static/logo.svg" alt="pallet-dimensioner" class="logo" width="32" height="32">
+            <h1>pallet-dimensioner</h1>
+            <div class="subtitle">v2.0.0 | Измерение габаритов паллет двумя веб-камерами + весы</div>
+        </header>
+
+        <nav>
+            <a href="#overview">Обзор</a>
+            <a href="#quickstart">Быстрый старт</a>
+            <a href="#points">Точки измерения</a>
+            <a href="#endpoints">API Endpoints</a>
+            <a href="#workplace">Рабочее место</a>
+            <a href="#qr">QR-код</a>
+            <a href="#settings">Настройки</a>
+            <a href="/posts">Точки →</a>
+        </nav>
+
+        <div class="content">
+            <h2 id="overview">Обзор</h2>
+            <p>pallet-dimensioner — веб-сервис на <strong>FastAPI</strong>, который по кадрам с двух ортогональных
+            веб-камер (<strong>top</strong> — сверху вниз, <strong>side</strong> — горизонтально) считает габариты
+            паллеты (длина, ширина, высота), опрашивает подключённые весы (<a href="#">scale_api</a>) и показывает
+            всё это на рабочем месте оператора вместе с QR-кодом для наклейки на паллету.</p>
+
+            <div class="info">
+                <p><strong>Точка измерения (post)</strong> — это одна физическая станция: две веб-камеры + опционально
+                весы. Точек может быть несколько (каждая — своя пара USB-камер на этом же хосте), но live-видео и
+                измерение работают только пока физически подключено соответствующее железо.</p>
+            </div>
+
+            <h2 id="quickstart">Быстрый старт</h2>
+            <pre><code># Поднять сервис через Docker Compose
+cp .env.example .env
+docker compose up -d
+
+# Проверить health
+curl http://localhost:8012/health
+
+# Открыть список точек в браузере
+http://localhost:8012/posts</code></pre>
+
+            <h2 id="points">Точки измерения</h2>
+            <p>Точка создаётся одним вызовом — камеры привязываются по индексу устройства
+            (<code>/dev/video0</code> → <code>0</code>), весы — по URL уже поднятого
+            <code>scale_api</code>:</p>
+
+            <pre><code>curl -X POST http://localhost:8012/api/posts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Пост 04",
+    "camera_top_device_id": 0,
+    "camera_side_device_id": 1,
+    "scale_api_url": "http://192.168.12.147:8011",
+    "wms_endpoint": "http://wms-backend.local:8000/api/v1/pallet-measurements"
+  }'</code></pre>
+
+            <p>Дальше — <code>POST /api/posts/{id}/start</code> запускает камеры и пайплайн измерения.
+            ROI, HSV-пороги фона и координаты ArUco-маркеров создаются с разумными дефолтами (см.
+            <a href="#settings">Настройки</a>) — их нужно донастроить под конкретный пост через
+            <code>PATCH</code> перед реальной эксплуатацией.</p>
+
+            <h2 id="endpoints">API Endpoints</h2>
+
+            <div class="endpoint">
+                <span class="method post">POST</span><code>/api/posts</code>
+                <p>Создать точку. Тело — см. пример выше. Возвращает созданный объект точки с <code>id</code>.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method get">GET</span><code>/api/posts</code>
+                <p>Список всех точек.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method get">GET</span><code>/api/posts/{id}</code>
+                <p>Конфигурация одной точки.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method patch">PATCH</span><code>/api/posts/{id}</code>
+                <p>Частичное обновление — ROI/HSV/ArUco камер, весы, WMS-эндпоинт, пороги стабилизации. Точку
+                нужно перезапустить (<code>/stop</code> → <code>/start</code>), чтобы воркер подхватил новый конфиг.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method delete">DELETE</span><code>/api/posts/{id}</code>
+                <p>Остановить воркер (если запущен) и удалить точку.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method post">POST</span><code>/api/posts/{id}/start</code>
+                <p>Открыть обе камеры и запустить фоновый цикл измерения для точки.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method post">POST</span><code>/api/posts/{id}/stop</code>
+                <p>Остановить цикл измерения и освободить камеры.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method get">GET</span><code>/api/posts/{id}/state</code>
+                <p>Текущее состояние: <code>status</code> (<code>running</code> / <code>camera_offline</code> /
+                <code>calibration_lost</code> / <code>stopped</code>), <code>length_mm</code>/<code>width_mm</code>/
+                <code>height_mm</code>, <code>cross_check_passed</code>, <code>stable</code>, <code>weight</code>.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method get">GET</span><code>/posts/{id}/stream/top</code>,
+                <code>/posts/{id}/stream/side</code>
+                <p>MJPEG-видеопоток с камеры точки (<code>multipart/x-mixed-replace</code>) — вставляется напрямую в
+                <code>&lt;img src="..."&gt;</code>.</p>
+            </div>
+            <div class="endpoint">
+                <span class="method get">GET</span><code>/posts/{id}/qr.png</code>
+                <p>QR-код (PNG) с текущими габаритами и весом — см. <a href="#qr">формат</a> ниже.</p>
+            </div>
+
+            <h2 id="workplace">Рабочее место оператора</h2>
+            <p><code>GET /posts/{id}/workplace</code> — страница с двумя живыми видео (top/side), текущими
+            длиной/шириной/высотой, показанием весов и QR-кодом. Цифры и QR обновляются поллингом
+            <code>/api/posts/{id}/state</code> каждые ~700&nbsp;мс — отдельный WebSocket не нужен для этого объёма
+            данных.</p>
+
+            <h2 id="qr">Формат QR-кода</h2>
+            <p>QR кодирует компактный JSON:</p>
+            <pre><code>{
+  "post_id": "post-04",
+  "post_name": "Пост 04",
+  "length_mm": 1195,
+  "width_mm": 800,
+  "height_mm": 1487,
+  "cross_check_passed": true,
+  "weight": 820.5,
+  "weight_unit": "kg",
+  "timestamp": "2026-08-18T10:23:41+00:00"
+}</code></pre>
+            <p>Поля, для которых ещё нет данных (точка не запущена / маркеры не найдены), в QR не попадают.</p>
+
+            <h2 id="settings">Настройки точки</h2>
+            <table>
+                <tr><th>Поле</th><th>По умолчанию</th><th>Смысл</th></tr>
+                <tr><td><code>camera_top.roi</code></td><td>весь кадр</td><td>Область поиска паллеты на виде сверху</td></tr>
+                <tr><td><code>camera_top.mount_height_mm</code></td><td>3200</td><td>Высота монтажа камеры над полом</td></tr>
+                <tr><td><code>camera_top/side.background_hsv_*</code></td><td>тёмный фон</td><td>HSV-диапазон фона для сегментации</td></tr>
+                <tr><td><code>camera_top/side.aruco_marker_positions_mm</code></td><td>прямоугольник 1200×800 / 1000мм</td><td>Физические координаты калибровочных маркеров</td></tr>
+                <tr><td><code>camera_side.floor_line_px</code></td><td>980</td><td>Линия пола в кадре side (для расчёта высоты)</td></tr>
+                <tr><td><code>stabilizer_window_size</code></td><td>12</td><td>Кадров в скользящем окне стабилизации</td></tr>
+                <tr><td><code>cross_check_tolerance_mm</code></td><td>30</td><td>Допуск расхождения top/side</td></tr>
+            </table>
+
+            <div class="warning">
+                <p>Калибровка объектива (файлы <code>camera_intrinsics_top.json</code> /
+                <code>_side.json</code> в <code>data/posts/{id}/</code>) не обязательна для запуска — без неё
+                просто не корректируется дисторсия объектива. Для точных измерений прогоните
+                <code>scripts/calibrate_post.py</code> так же, как в headless-режиме (см. README).</p>
+            </div>
+        </div>
+
+        <footer>pallet-dimensioner · <a href="/posts">Точки</a> · <a href="/docs">OpenAPI (Swagger)</a></footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ post.name }} — Рабочее место</title>
+    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+    <link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <img src="/static/logo.svg" alt="pallet-dimensioner" class="logo" width="32" height="32">
+            <h1>{{ post.name }}</h1>
+            <div class="subtitle">id: {{ post.id }} · <span id="status-badge" class="badge stopped">—</span></div>
+        </header>
+
+        <nav>
+            <a href="/posts">← Все точки</a>
+            <a href="/">Документация</a>
+        </nav>
+
+        <div class="content">
+            <div class="workplace-grid">
+                <div>
+                    <div class="camera-label">Камера top</div>
+                    <div class="camera-feed"><img src="/posts/{{ post.id }}/stream/top" alt="top"></div>
+                </div>
+                <div>
+                    <div class="camera-label">Камера side</div>
+                    <div class="camera-feed"><img src="/posts/{{ post.id }}/stream/side" alt="side"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="dim-panel">
+                <div class="dim-tile"><div class="value" id="val-length">—</div><div class="label">Длина, мм</div></div>
+                <div class="dim-tile"><div class="value" id="val-width">—</div><div class="label">Ширина, мм</div></div>
+                <div class="dim-tile"><div class="value" id="val-height">—</div><div class="label">Высота, мм</div></div>
+                <div class="dim-tile"><div class="value" id="val-weight">—</div><div class="label">Вес</div></div>
+            </div>
+            <p id="cross-check-line" style="color:var(--text-secondary)"></p>
+        </div>
+
+        <div class="content" style="display:flex; gap:2rem; align-items:center; flex-wrap:wrap;">
+            <div class="qr-box">
+                <img id="qr-img" src="/posts/{{ post.id }}/qr.png" alt="QR">
+                <div class="meta" style="color:var(--text-secondary); margin-top:.5rem;">QR обновляется вместе с измерением</div>
+            </div>
+            <div>
+                <p><strong>Как считать:</strong> держи паллету в зоне до появления зелёного статуса
+                <span class="badge running">stable</span> — цифры и QR стабилизировались по серии кадров.</p>
+            </div>
+        </div>
+
+        <footer>pallet-dimensioner · <a href="/posts">Точки</a></footer>
+    </div>
+
+<script>
+const postId = "{{ post.id }}";
+
+function fmt(v) { return (v === null || v === undefined) ? '—' : Math.round(v); }
+
+async function poll() {
+    try {
+        const res = await fetch(`/api/posts/${postId}/state`);
+        if (!res.ok) throw new Error('not started');
+        const s = await res.json();
+
+        const badge = document.getElementById('status-badge');
+        badge.textContent = s.stable ? 'stable' : s.status;
+        badge.className = 'badge ' + (s.stable ? 'running' : s.status);
+
+        document.getElementById('val-length').textContent = fmt(s.length_mm);
+        document.getElementById('val-width').textContent = fmt(s.width_mm);
+        document.getElementById('val-height').textContent = fmt(s.height_mm);
+
+        const w = s.weight;
+        document.getElementById('val-weight').textContent =
+            (w && w.ok && w.value !== null) ? `${w.value} ${w.unit || ''}` : '—';
+
+        const cc = document.getElementById('cross-check-line');
+        cc.textContent = s.cross_check_passed === null || s.cross_check_passed === undefined
+            ? ''
+            : (s.cross_check_passed ? '✓ Кросс-проверка top/side пройдена' : '⚠ Расхождение top/side больше допуска');
+
+        if (s.stable) {
+            document.getElementById('qr-img').src = `/posts/${postId}/qr.png?t=${Date.now()}`;
+        }
+    } catch (e) {
+        document.getElementById('status-badge').textContent = 'не запущена';
+        document.getElementById('status-badge').className = 'badge stopped';
+    }
+}
+
+poll();
+setInterval(poll, 700);
+</script>
+</body>
+</html>

@@ -14,4 +14,6 @@ RUN pip install --default-timeout=120 --retries 5 --no-cache-dir \
 
 COPY . .
 
-CMD ["python", "-m", "src.main"]
+EXPOSE 8012
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8012"]

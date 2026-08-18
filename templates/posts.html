@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pallet-dimensioner — Точки измерения</title>
+    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+    <link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <img src="/static/logo.svg" alt="pallet-dimensioner" class="logo" width="32" height="32">
+            <h1>Точки измерения</h1>
+            <div class="subtitle">камеры + весы, привязанные к посту</div>
+        </header>
+
+        <nav>
+            <a href="/">← Документация</a>
+        </nav>
+
+        <div class="content">
+            <h2>Создать точку</h2>
+            <form id="create-form" class="form-grid">
+                <div>
+                    <label>Название</label>
+                    <input name="name" required placeholder="Пост 04">
+                </div>
+                <div>
+                    <label>Камера top (device_id)</label>
+                    <input name="camera_top_device_id" type="number" required value="0">
+                </div>
+                <div>
+                    <label>Камера side (device_id)</label>
+                    <input name="camera_side_device_id" type="number" required value="1">
+                </div>
+                <div>
+                    <label>URL весов (scale_api, необязательно)</label>
+                    <input name="scale_api_url" placeholder="http://192.168.12.147:8011">
+                </div>
+                <div>
+                    <label>WMS endpoint (необязательно)</label>
+                    <input name="wms_endpoint" placeholder="http://wms-backend.local:8000/api/v1/pallet-measurements">
+                </div>
+                <div style="align-self:end">
+                    <button type="submit" class="primary">Создать</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="content">
+            <h2>Точки ({{ posts|length }})</h2>
+            {% if not posts %}
+            <p style="color:var(--text-secondary)">Пока нет ни одной точки — создай первую формой выше.</p>
+            {% endif %}
+            {% for post in posts %}
+            {% set st = statuses.get(post.id) %}
+            <div class="post-card" data-post-id="{{ post.id }}">
+                <div>
+                    <div class="name">{{ post.name }} <span class="badge {{ st.status.value if st else 'stopped' }}">{{ st.status.value if st else 'stopped' }}</span></div>
+                    <div class="meta">
+                        id: <code>{{ post.id }}</code> ·
+                        top: /dev/video{{ post.camera_top.device_id }} ·
+                        side: /dev/video{{ post.camera_side.device_id }}
+                        {% if post.scale_api_url %} · весы: {{ post.scale_api_url }}{% endif %}
+                    </div>
+                </div>
+                <div class="actions">
+                    <a class="btn" href="/posts/{{ post.id }}/workplace">Рабочее место</a>
+                    <button onclick="startPost('{{ post.id }}')">Старт</button>
+                    <button onclick="stopPost('{{ post.id }}')">Стоп</button>
+                    <button class="danger" onclick="deletePost('{{ post.id }}')">Удалить</button>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <footer>pallet-dimensioner · <a href="/">Документация</a></footer>
+    </div>
+
+<script>
+document.getElementById('create-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const body = {
+        name: form.get('name'),
+        camera_top_device_id: parseInt(form.get('camera_top_device_id'), 10),
+        camera_side_device_id: parseInt(form.get('camera_side_device_id'), 10),
+        scale_api_url: form.get('scale_api_url') || null,
+        wms_endpoint: form.get('wms_endpoint') || null,
+    };
+    const res = await fetch('/api/posts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    });
+    if (res.ok) { location.reload(); } else { alert('Ошибка создания: ' + await res.text()); }
+});
+
+async function startPost(id) {
+    await fetch(`/api/posts/${id}/start`, {method: 'POST'});
+    setTimeout(() => location.reload(), 800);
+}
+async function stopPost(id) {
+    await fetch(`/api/posts/${id}/stop`, {method: 'POST'});
+    setTimeout(() => location.reload(), 300);
+}
+async function deletePost(id) {
+    if (!confirm('Удалить точку ' + id + '?')) return;
+    await fetch(`/api/posts/${id}`, {method: 'DELETE'});
+    location.reload();
+}
+</script>
+</body>
+</html>

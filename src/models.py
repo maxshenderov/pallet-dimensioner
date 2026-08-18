@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 import numpy as np
@@ -96,3 +97,116 @@ class MeasurementResult(BaseModel):
     width_mm: float
     height_mm: float
     samples_count: int
+
+
+# ---------------------------------------------------------------------------
+# Веб-слой: точки измерения (посты), создаваемые/управляемые через веб-сервис.
+# В отличие от PostConfig (строгий YAML для headless-режима), Post рассчитан на
+# быстрое создание через API с разумными дефолтами — тонкая настройка ROI/HSV/
+# ArUco делается уже после создания через PATCH.
+# ---------------------------------------------------------------------------
+
+DEFAULT_TOP_MARKER_POSITIONS_MM: dict[int, tuple[float, float]] = {
+    1: (0.0, 0.0), 2: (1200.0, 0.0), 3: (1200.0, 800.0), 4: (0.0, 800.0),
+}
+DEFAULT_SIDE_MARKER_POSITIONS_MM: dict[int, tuple[float, float]] = {
+    5: (0.0, 0.0), 6: (1000.0, 0.0),
+}
+
+
+class PostStatus(str, Enum):
+    stopped = "stopped"
+    starting = "starting"
+    running = "running"
+    camera_offline = "camera_offline"
+    calibration_lost = "calibration_lost"
+
+
+class CameraBinding(BaseModel):
+    """Привязка камеры к точке — с дефолтами, чтобы точку можно было создать одним вызовом."""
+
+    device_id: int
+    resolution: tuple[int, int] = (1920, 1080)
+    roi: tuple[int, int, int, int] = (0, 0, 1920, 1080)
+    aruco_marker_ids: list[int] = Field(default_factory=lambda: [1, 2, 3, 4])
+    aruco_marker_positions_mm: dict[int, tuple[float, float]] = Field(
+        default_factory=lambda: dict(DEFAULT_TOP_MARKER_POSITIONS_MM)
+    )
+    background_hsv_lower: tuple[int, int, int] = (0, 0, 0)
+    background_hsv_upper: tuple[int, int, int] = (180, 60, 90)
+    min_contour_area_px: int = 5000
+
+
+class CameraTopBinding(CameraBinding):
+    mount_height_mm: float = 3200.0
+
+
+class CameraSideBinding(CameraBinding):
+    aruco_marker_ids: list[int] = Field(default_factory=lambda: [5, 6])
+    aruco_marker_positions_mm: dict[int, tuple[float, float]] = Field(
+        default_factory=lambda: dict(DEFAULT_SIDE_MARKER_POSITIONS_MM)
+    )
+    reference_distance_mm: float = 2500.0
+    floor_line_px: int = 980
+
+
+class Post(BaseModel):
+    """Точка измерения: имя + привязанные камеры + весы (scale_api) + опционально WMS-эндпоинт."""
+
+    id: str
+    name: str
+    camera_top: CameraTopBinding
+    camera_side: CameraSideBinding
+    scale_api_url: str | None = None
+    wms_endpoint: str | None = None
+    stabilizer_window_size: int = Field(default=12, gt=0)
+    stabilizer_stddev_threshold_mm: float = Field(default=15.0, gt=0)
+    cross_check_tolerance_mm: float = Field(default=30.0, gt=0)
+    created_at: datetime
+
+
+class PostCreateRequest(BaseModel):
+    """Минимальные данные для создания точки — остальное берётся по дефолту."""
+
+    name: str
+    camera_top_device_id: int
+    camera_side_device_id: int
+    scale_api_url: str | None = None
+    wms_endpoint: str | None = None
+
+
+class PostUpdateRequest(BaseModel):
+    """Частичное обновление точки — калибровочные поля правятся уже после создания."""
+
+    name: str | None = None
+    camera_top: CameraTopBinding | None = None
+    camera_side: CameraSideBinding | None = None
+    scale_api_url: str | None = None
+    wms_endpoint: str | None = None
+    stabilizer_window_size: int | None = Field(default=None, gt=0)
+    stabilizer_stddev_threshold_mm: float | None = Field(default=None, gt=0)
+    cross_check_tolerance_mm: float | None = Field(default=None, gt=0)
+
+
+class WeightReading(BaseModel):
+    """Показание весов (формат scale_api GET /api/weight)."""
+
+    ok: bool
+    value: float | None = None
+    unit: str | None = None
+    stable: bool | None = None
+
+
+class PostState(BaseModel):
+    """Живое состояние точки — то, что видит рабочее место оператора."""
+
+    post_id: str
+    status: PostStatus = PostStatus.stopped
+    length_mm: float | None = None
+    width_mm: float | None = None
+    height_mm: float | None = None
+    cross_check_passed: bool | None = None
+    stable: bool = False
+    weight: WeightReading | None = None
+    updated_at: datetime | None = None
+    error: str | None = None
