@@ -1,11 +1,14 @@
 """Тесты модели камеры-обскуры боковой камеры (vision/perspective.py)."""
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
 from src.vision.perspective import (
     camera_nadir_mm,
+    clip_below_floor,
+    floor_row_px,
     footprint_mm_without_side_faces,
     contour_to_floor_mm,
     focal_length_px,
@@ -109,13 +112,30 @@ class TestWidth:
 MOUNT_MM = 4000.0
 
 
-def silhouette_of_box(centre_x, centre_y, size_x, size_y, height_mm, nadir=(0.0, 0.0)):
-    """Силуэт коробки сверху: объединение основания и растянутой верхней грани."""
-    m = MOUNT_MM / (MOUNT_MM - height_mm)
-    base = np.array([
+def base_of_box(centre_x, centre_y, size_x, size_y):
+    return np.array([
         [centre_x - size_x / 2, centre_y - size_y / 2], [centre_x + size_x / 2, centre_y - size_y / 2],
         [centre_x + size_x / 2, centre_y + size_y / 2], [centre_x - size_x / 2, centre_y + size_y / 2],
     ])
+
+
+def silhouette_of_box(centre_x, centre_y, size_x, size_y, height_mm, nadir=(0.0, 0.0)):
+    """Силуэт коробки сверху ТАКОЙ, КАКОЙ ЕГО ОТДАЁТ СЕГМЕНТАЦИЯ: одна верхняя грань.
+
+    Геометрически в силуэт попадает и основание, но на стенде до него не доходит: ближняя к
+    надиру боковая грань обращена от света, выходит тёмной и в маску не попадает. Замер на
+    коробке 122 x 78 x 44, стоящей вертикально: силуэт по короткой оси 62.8 мм при увеличении
+    1.409, то есть ровно 44 x 1.409 — верхняя грань без всякого основания.
+    """
+    m = MOUNT_MM / (MOUNT_MM - height_mm)
+    base = base_of_box(centre_x, centre_y, size_x, size_y)
+    return ((base - np.asarray(nadir)) * m + np.asarray(nadir)).astype(np.float32)
+
+
+def silhouette_with_side_faces(centre_x, centre_y, size_x, size_y, height_mm, nadir=(0.0, 0.0)):
+    """Силуэт, в который попала и ближняя боковая грань — случай другого освещения."""
+    m = MOUNT_MM / (MOUNT_MM - height_mm)
+    base = base_of_box(centre_x, centre_y, size_x, size_y)
     top = (base - np.asarray(nadir)) * m + np.asarray(nadir)
     return np.vstack([base, top]).astype(np.float32)
 
@@ -132,10 +152,23 @@ class TestFootprint:
         assert sides == pytest.approx((1200.0, 800.0))
 
     def test_object_far_off_centre(self):
-        """Видна ближняя к надиру боковая грань: её сторону сжимать нельзя."""
+        """Груз далеко от центра — там и вылезала ошибка в четверть по короткой стороне."""
         points = silhouette_of_box(2000.0, 1400.0, 1200.0, 800.0, 1500.0)
         sides = footprint_mm_without_side_faces(points, np.array([0.0, 0.0]), 1500.0, MOUNT_MM)
         assert sides == pytest.approx((1200.0, 800.0))
+
+    def test_visible_side_face_would_be_underestimated(self):
+        """Известное ограничение, а не забытый случай.
+
+        Если освещение изменится и ближняя боковая грань начнёт попадать в маску, силуэт
+        станет длиннее верхней грани, и деление всего силуэта на увеличение занизит габарит.
+        Признак на посту — габарит поехал вниз тем сильнее, чем выше груз.
+        """
+        points = silhouette_with_side_faces(2000.0, 1400.0, 1200.0, 800.0, 1500.0)
+        width, depth = footprint_mm_without_side_faces(
+            points, np.array([0.0, 0.0]), 1500.0, MOUNT_MM
+        )
+        assert width > 1200.0 and depth > 800.0
 
     def test_same_box_measures_the_same_wherever_it_stands(self):
         measured = [
@@ -151,3 +184,99 @@ class TestFootprint:
         points = silhouette_of_box(2000.0, 0.0, 1200.0, 800.0, 0.0)
         sides = footprint_mm_without_side_faces(points, np.array([0.0, 0.0]), 0.0, MOUNT_MM)
         assert sides == pytest.approx((1200.0, 800.0))
+
+
+def turned_silhouette(centre_x, centre_y, size_x, size_y, height_mm, degrees, nadir=(0.0, 0.0)):
+    """Силуэт коробки, повёрнутой в плоскости пола на `degrees`."""
+    base = base_of_box(0.0, 0.0, size_x, size_y)
+    angle = np.deg2rad(degrees)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    turned = base @ rotation.T + np.array([centre_x, centre_y])
+    m = MOUNT_MM / (MOUNT_MM - height_mm)
+    return ((turned - np.asarray(nadir)) * m + np.asarray(nadir)).astype(np.float32)
+
+
+class TestWidthAndDepthLabels:
+    """Ширина — вдоль оси x пола, глубина — вдоль y. Не «длинная и короткая».
+
+    Оси пола задаёт таблица меток верхней камеры: на посту 1 линия «метка 2 -> метка 1» идёт
+    вдоль x и есть ширина. Боковая камера в определении не участвует.
+
+    Обе прежние версии этого места давали на посту неверные названия: сначала ширина была
+    длинной стороной (поворот груза не менял ни одной цифры), потом — стороной, обращённой к
+    боковой камере (на посту 1 это ровно обратные названия).
+    """
+
+    def test_width_is_the_x_side_even_when_it_is_the_short_one(self):
+        """Главный случай: короткая сторона вдоль x всё равно называется шириной."""
+        points = silhouette_of_box(2000.0, 1400.0, 800.0, 1200.0, 1500.0)
+        width, depth = footprint_mm_without_side_faces(points, np.array([0.0, 0.0]), 1500.0, MOUNT_MM)
+        assert (width, depth) == pytest.approx((800.0, 1200.0))
+
+    def test_turning_the_load_swaps_them(self):
+        """Груз повернули на 90° — ширина с глубиной обязаны поменяться местами."""
+        straight = silhouette_of_box(2000.0, 1400.0, 1200.0, 800.0, 1500.0)
+        turned = silhouette_of_box(2000.0, 1400.0, 800.0, 1200.0, 1500.0)
+
+        assert footprint_mm_without_side_faces(
+            straight, np.array([0.0, 0.0]), 1500.0, MOUNT_MM) == pytest.approx((1200.0, 800.0))
+        assert footprint_mm_without_side_faces(
+            turned, np.array([0.0, 0.0]), 1500.0, MOUNT_MM) == pytest.approx((800.0, 1200.0))
+
+    def test_turned_load_keeps_its_own_sides_not_the_bounding_box(self):
+        """Повёрнутый груз: стороны — его собственные, названия — по ближайшей оси пола.
+
+        Если бы стороны считались проекцией на оси пола, коробка 1200x800 под 30° дала бы
+        описанный прямоугольник 1439x1293 вместо своих сторон.
+        """
+        points = turned_silhouette(2000.0, 1400.0, 1200.0, 800.0, 1500.0, 30.0)
+        assert footprint_mm_without_side_faces(
+            points, np.array([0.0, 0.0]), 1500.0, MOUNT_MM) == pytest.approx((1200.0, 800.0), rel=1e-3)
+
+    def test_past_forty_five_degrees_the_labels_change_over(self):
+        """Под 60° к оси x ближе уже короткая сторона — она и становится шириной."""
+        points = turned_silhouette(2000.0, 1400.0, 1200.0, 800.0, 1500.0, 60.0)
+        assert footprint_mm_without_side_faces(
+            points, np.array([0.0, 0.0]), 1500.0, MOUNT_MM) == pytest.approx((800.0, 1200.0), rel=1e-3)
+
+
+class TestFloorRow:
+    """Плоскость основания груза: ниже неё в силуэте груза быть не может.
+
+    Через неё убирается то, что маска захватывает СВЯЗНО с грузом и потому не отсекается ни
+    выбором контура, ни склейкой кусков: собственная тень, отражение в глянцевом полу, обрывок
+    упаковки у ножки. На стенде рулон высотой 100 мм читался как 125 — маска уходила на 156 px
+    ниже основания через тень на лежащий рядом скотч.
+    """
+
+    def test_row_moves_with_distance(self):
+        """Одной константой строку не задать — она уезжает тем ниже, чем ближе груз."""
+        near = floor_row_px(540.0, 45600.0, 200.0)
+        far = floor_row_px(540.0, 45600.0, 400.0)
+        assert near == pytest.approx(768.0)
+        assert far == pytest.approx(654.0)
+        assert near - far == pytest.approx(114.0)
+
+    def test_uncalibrated_post_changes_nothing(self):
+        assert floor_row_px(None, None, 250.0) is None
+        contour = np.array([[[10, 20]], [[10, 900]], [[80, 900]]], dtype=np.int32)
+        assert np.array_equal(clip_below_floor(contour, None), contour)
+
+    def test_everything_below_the_floor_is_cut(self):
+        contour = np.array([[[10, 240]], [[10, 1024]], [[80, 1024]], [[80, 240]]], dtype=np.int32)
+        _, y, _, h = cv2.boundingRect(clip_below_floor(contour, 868.0))
+        assert (y, y + h - 1) == (240, 868)
+
+    def test_a_silhouette_above_the_floor_is_left_alone(self):
+        """Обрезка идёт только вниз: недотянувшийся до основания контур не достраивается,
+        иначе занижение высоты стало бы невидимым."""
+        contour = np.array([[[10, 240]], [[10, 700]], [[80, 700]], [[80, 240]]], dtype=np.int32)
+        assert np.array_equal(clip_below_floor(contour, 868.0), contour)
+
+    def test_the_roll_from_the_bench(self):
+        """Живой случай: силуэт 238..1024 при основании на 868."""
+        contour = np.array([[[968, 238]], [[968, 1024]], [[1368, 1024]], [[1368, 238]]], dtype=np.int32)
+        _, _, _, before = cv2.boundingRect(contour)
+        _, _, _, after = cv2.boundingRect(clip_below_floor(contour, 868.0))
+        assert before == 787 and after == 631
+        assert 125.0 * after / before == pytest.approx(100.2, abs=0.5)

@@ -9,9 +9,13 @@ services:
       - "${CAMERA_SIDE_DEVICE:-/dev/video1}:/dev/video1"
     volumes:
       - ./config:/app/config
-      - ./data:/app/data
+      # Единственное, что обязано пережить пересборку образа: настройки точек, база замеров
+      # и обученных поправок (pallet.db), intrinsics камер, очередь неотправленных событий.
+      # Bind mount, а не именованный том, — чтобы бэкап был обычным копированием каталога.
+      - "${DATA_DIR:-./data}:/app/data"
     environment:
       - PYTHONUNBUFFERED=1
+      - DATA_DIR=/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health')"]

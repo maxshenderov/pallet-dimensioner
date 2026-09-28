@@ -11,14 +11,20 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     import app as app_module
+    from src.storage import Database
     from src.store import PostStore
     from src.worker import PostWorkerRegistry
 
     app_module.registry.stop_all()
     app_module.store = PostStore(tmp_path / "posts.json")
-    app_module.registry = PostWorkerRegistry()
+    # Каталог данных задан от каталога сервиса, поэтому без подмены тесты писали бы базу замеров
+    # и настройки точек прямо в рабочий каталог репозитория.
+    app_module.database = Database(tmp_path / "pallet.db")
+    app_module.POSTS_DIR = tmp_path / "posts"
+    app_module.registry = PostWorkerRegistry(app_module.database, app_module.POSTS_DIR)
     yield TestClient(app_module.app)
     app_module.registry.stop_all()
+    app_module.database.close()
 
 
 def _create_post(client, **overrides):

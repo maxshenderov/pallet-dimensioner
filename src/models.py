@@ -163,6 +163,17 @@ class CameraSideBinding(CameraBinding):
     depth_sign: Literal[1, -1] = 1
     # Больше не участвует в расчёте высоты — остаётся только линией-ориентиром на видео.
     floor_line_px: int = 980
+    # Строка кадра, где проходит плоскость основания груза: v = floor_row_a + floor_row_b / d,
+    # где d — расстояние до передней грани с верхней камеры. Всё, что ниже этой строки, грузом
+    # быть не может, и контур по ней обрезается (см. vision/perspective.py:floor_row_px).
+    #
+    # Одной константой (floor_line_px) это не задаётся: строка основания уезжает с расстоянием.
+    # На стенде при 200 мм она на 228 px ниже горизонта, при 300 мм — на 152; разброс 76 px, а
+    # это 12 мм высоты. Оба числа снимаются один раз скриптом scripts/calibrate_floor_row.py.
+    #
+    # Когда груз стоит не на полу, а на площадке весов, эти же два числа описывают верх площадки.
+    floor_row_a: float | None = None
+    floor_row_b: float | None = None
 
 
 class Post(BaseModel):
@@ -177,6 +188,11 @@ class Post(BaseModel):
     stabilizer_window_size: int = Field(default=12, gt=0)
     stabilizer_stddev_threshold_mm: float = Field(default=15.0, gt=0)
     cross_check_tolerance_mm: float = Field(default=30.0, gt=0)
+    # Обученная поправка правит систематику метода (утопленный оптический центр, наклон верхней
+    # камеры, приближение «надир = центр кадра»). Выключается, если поправка портит показания.
+    correction_enabled: bool = True
+    # Точность против гарантии: с запасом модель почти не занижает, но точность вдвое хуже.
+    correction_guarantee_no_underestimate: bool = False
     created_at: datetime
 
 
@@ -201,6 +217,47 @@ class PostUpdateRequest(BaseModel):
     stabilizer_window_size: int | None = Field(default=None, gt=0)
     stabilizer_stddev_threshold_mm: float | None = Field(default=None, gt=0)
     cross_check_tolerance_mm: float | None = Field(default=None, gt=0)
+    correction_enabled: bool | None = None
+    correction_guarantee_no_underestimate: bool | None = None
+
+
+class TrainingSample(BaseModel):
+    """Один размеченный замер: признаки измерения + истинные габариты с рулетки."""
+
+    features: list[float]
+    height_mm: float = Field(gt=0)
+    width_mm: float = Field(gt=0)
+    depth_mm: float = Field(gt=0)
+    backend: str = "dual_webcam_ortho"
+    measured_height_mm: float | None = None
+    measured_width_mm: float | None = None
+    measured_depth_mm: float | None = None
+    created_at: datetime
+
+
+class TrainingSampleRequest(BaseModel):
+    """Оператор ввёл истинные габариты — признаки сервис возьмёт из текущего измерения сам."""
+
+    height_mm: float = Field(gt=0)
+    width_mm: float = Field(gt=0)
+    depth_mm: float = Field(gt=0)
+
+
+class TrainingStatus(BaseModel):
+    """Состояние обучения точки — то, что видит оператор на рабочем месте."""
+
+    backend: str
+    samples_count: int
+    minimum_samples: int
+    recommended_samples: int
+    trained: bool
+    trained_on_samples: int | None = None
+    # Ожидаемая ошибка на НЕвиданных паллетах (высота/ширина/глубина), а не на обучающих данных.
+    expected_error_mm: list[float] | None = None
+    # Чему выборка научить не сможет: одинаковые размеры, груз всегда на одном месте. Оценка по
+    # отложенной выборке такое не ловит — там замеры так же однообразны и ошибка выходит красивой.
+    warning: str | None = None
+    updated_at: datetime | None = None
 
 
 class WeightReading(BaseModel):
@@ -220,6 +277,12 @@ class PostState(BaseModel):
     height_mm: float | None = None
     width_mm: float | None = None
     depth_mm: float | None = None
+    # Габарит до обученной поправки. Показывается рядом с исправленным, чтобы расхождение
+    # было видно оператору, а не проявлялось молча.
+    raw_height_mm: float | None = None
+    raw_width_mm: float | None = None
+    raw_depth_mm: float | None = None
+    correction_applied: bool = False
     cross_check_passed: bool | None = None
     stable: bool = False
     weight: WeightReading | None = None

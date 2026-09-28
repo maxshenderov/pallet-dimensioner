@@ -14,11 +14,17 @@ from .calibration.aruco_homography import compute_homography, detect_markers
 from .calibration.camera_calibrate import load_intrinsics, undistort
 from .capture.camera_stream import CameraStream, CameraUnavailableError, get_synchronized_frames
 from .integration.api_client import send_measurement
-from .models import MeasurementEvent, Post, PostState, PostStatus, WeightReading
+from .models import MeasurementEvent, Post, PostState, PostStatus, TrainingSample, WeightReading
+from .storage import Database
+from .training import TrainingStore
+from .vision.correction import BACKEND_ORTHO, CorrectionModel, ortho_features
 from .vision.dimensions import cross_check
+from .vision.visual_hull import HullBox
 from .vision.perspective import (
     camera_nadir_mm,
+    clip_below_floor,
     contour_to_floor_mm,
+    floor_row_px,
     focal_length_px_from_markers,
     footprint_mm_without_side_faces,
     height_looks_inflated,
@@ -34,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 CAMERA_OFFLINE_RETRY_SECONDS = 5.0
 CALIBRATION_LOST_RETRY_SECONDS = 1.0
+# На столько силуэт может не дотягиваться до основания, пока это ещё считается шумом маски.
+BASE_NOT_REACHED_PX = 15
 WEIGHT_TIMEOUT_SECONDS = 2.0
 JPEG_QUALITY = 80
 
@@ -41,15 +49,22 @@ JPEG_QUALITY = 80
 class PostWorker:
     """Один воркер = один физический пост (2 камеры + опционально весы), в своём потоке."""
 
-    def __init__(self, post: Post, intrinsics_dir: str | Path = "data/posts"):
+    def __init__(self, post: Post, database: Database, intrinsics_dir: str | Path = "data/posts"):
         self.post = post
-        self._intrinsics_dir = Path(intrinsics_dir) / post.id
+        self._db = database
+        self._post_dir = Path(intrinsics_dir) / post.id
+        self._intrinsics_dir = self._post_dir
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._state = PostState(post_id=post.id)
         self._frames: dict[str, bytes] = {}
         self._ema: dict[str, float] = {}
+        self.training = TrainingStore(database, post.id, self._post_dir)
+        # Признаки последнего измерения — их забирает кнопка «Запомнить» на рабочем месте,
+        # когда оператор вводит истинные габариты с рулетки.
+        self._last_sample: tuple[list[float], HullBox] | None = None
+        self._correction: CorrectionModel | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -79,6 +94,29 @@ class PostWorker:
     def get_frame_jpeg(self, camera: str) -> bytes | None:
         with self._lock:
             return self._frames.get(camera)
+
+    def capture_training_sample(self, height_mm: float, width_mm: float, depth_mm: float) -> TrainingSample:
+        """Снимает признаки текущего измерения и связывает их с истинными габаритами.
+
+        Габарит берётся СЫРОЙ, до обученной поправки: иначе следующая модель будет учиться
+        поверх предыдущей, и ошибки начнут накапливаться от переобучения к переобучению.
+        """
+        with self._lock:
+            sample = self._last_sample
+        if sample is None:
+            raise LookupError("Нет текущего измерения: объект не найден или пост не запущен")
+
+        features, raw = sample
+        return TrainingSample(
+            features=features, height_mm=height_mm, width_mm=width_mm, depth_mm=depth_mm,
+            backend=BACKEND_ORTHO,
+            measured_height_mm=raw.height_mm, measured_width_mm=raw.width_mm, measured_depth_mm=raw.depth_mm,
+            created_at=_now(),
+        )
+
+    def reload_correction(self) -> None:
+        """Перечитывает модель поправки — вызывается после обучения, без перезапуска поста."""
+        self._correction = self.training.load_model() if self.post.correction_enabled else None
 
     # -- internals ------------------------------------------------------------
 
@@ -136,6 +174,9 @@ class PostWorker:
             return
 
         stabilizer = MeasurementStabilizer(post.stabilizer_window_size, post.stabilizer_stddev_threshold_mm)
+        self.reload_correction()
+        if self._correction is not None:
+            logger.info("Пост %s: поправка обучена на %d замерах", post.id, self._correction.samples_count)
         logger.info("Пост %s запущен", post.id)
         self._set_state(status=PostStatus.running, error=None)
 
@@ -163,11 +204,14 @@ class PostWorker:
 
         weight = self._fetch_weight()
 
-        homography_top = compute_homography(detect_markers(frame_top), post.camera_top.aruco_marker_positions_mm)
+        markers_top = detect_markers(frame_top)
+        markers_side = detect_markers(frame_side)
+
+        homography_top = compute_homography(markers_top, post.camera_top.aruco_marker_positions_mm)
         # Боковой камере гомография не нужна: её масштаб зависит от расстояния до объекта и
         # пересчитывается на каждом кадре. От маркеров 5/6 нужно только фокусное расстояние.
         focal_side = focal_length_px_from_markers(
-            detect_markers(frame_side),
+            markers_side,
             post.camera_side.aruco_marker_positions_mm,
             post.camera_side.reference_distance_mm,
         )
@@ -185,20 +229,25 @@ class PostWorker:
             frame_top, post.camera_top.roi,
             post.camera_top.background_hsv_lower, post.camera_top.background_hsv_upper,
             post.camera_top.min_contour_area_px,
+            markers_top.values(),
         )
         contour_side = segment_pallet(
             frame_side, post.camera_side.roi,
             post.camera_side.background_hsv_lower, post.camera_side.background_hsv_upper,
             post.camera_side.min_contour_area_px,
+            markers_side.values(),
         )
 
         if contour_top is None or contour_side is None:
             stabilizer.reset()
             self._ema.clear()
+            with self._lock:
+                self._last_sample = None  # нечего запоминать: размечать можно только живой замер
             self._set_frame("top", _draw_overlay(frame_top, contour_top, ["Объект не найден"]))
             self._set_frame("side", _draw_overlay(frame_side, contour_side, ["Объект не найден"], post.camera_side.floor_line_px))
             self._set_state(status=PostStatus.running, weight=weight, stable=False,
-                             width_mm=None, depth_mm=None, height_mm=None, cross_check_passed=None)
+                             width_mm=None, depth_mm=None, height_mm=None, cross_check_passed=None,
+                             raw_width_mm=None, raw_depth_mm=None, raw_height_mm=None)
             return
 
         # Верхняя камера даёт не только footprint, но и положение объекта в мм на полу —
@@ -210,9 +259,20 @@ class PostWorker:
             lens_depth_mm(side_cfg.markers_depth_mm, side_cfg.reference_distance_mm, side_cfg.depth_sign),
             side_cfg.depth_axis,
         )
+        # Ниже плоскости основания груза быть не может — всё, что маска захватила там (тень,
+        # отражение в глянцевом полу, обрывок упаковки у ножки), из силуэта убирается.
+        floor_row = floor_row_px(side_cfg.floor_row_a, side_cfg.floor_row_b, near_mm)
+        contour_side = clip_below_floor(contour_side, floor_row)
+
         _, top_px, width_px, height_px = cv2.boundingRect(contour_side)
         height = height_mm_from_near_face(top_px, top_px + height_px, near_mm, focal_side)
         side = width_mm_from_pinhole(width_px, near_mm, focal_side)
+
+        if floor_row is not None and floor_row - (top_px + height_px) > BASE_NOT_REACHED_PX:
+            # Контур не дотянулся до основания: низ груза в маску не попал. Обрезка это не
+            # исправляет намеренно — иначе занижение высоты стало бы невидимым.
+            logger.warning("Пост %s: низ груза не выделился, силуэт кончается на %d px выше "
+                           "основания — высота занижена", post.id, floor_row - (top_px + height_px))
 
         if height_looks_inflated(height, side_cfg.lens_height_mm):
             logger.warning(
@@ -221,23 +281,45 @@ class PostWorker:
                 post.id, height, side_cfg.lens_height_mm,
             )
 
+        nadir = camera_nadir_mm(homography_top, (frame_top.shape[1], frame_top.shape[0]))
+        # Ширина — вдоль оси x пола, глубина — вдоль y; оси задаёт таблица меток верхней
+        # камеры. `side_cfg.depth_axis` сюда не входит: он про масштаб боковой камеры
+        # (object_distances_mm выше), а не про названия габаритов.
         width, depth = footprint_mm_without_side_faces(
-            floor_points,
-            camera_nadir_mm(homography_top, (frame_top.shape[1], frame_top.shape[0])),
-            height,
-            post.camera_top.mount_height_mm,
+            floor_points, nadir, height, post.camera_top.mount_height_mm,
         )
         passed = cross_check((width, depth), side, post.cross_check_tolerance_mm)
 
-        width_disp = self._smooth("width", width)
-        depth_disp = self._smooth("depth", depth)
-        height_disp = self._smooth("height", height)
+        raw_width_disp = self._smooth("width", width)
+        raw_depth_disp = self._smooth("depth", depth)
+        raw_height_disp = self._smooth("height", height)
+        raw = HullBox(raw_height_disp, raw_width_disp, raw_depth_disp)
+
+        # Признаки считаются на КАЖДОМ кадре, а не только в режиме обучения: тогда модель можно
+        # переобучить задним числом, не выставляя паллеты заново.
+        features = ortho_features(
+            raw_height_disp, raw_width_disp, raw_depth_disp,
+            side, near_mm, floor_points, nadir,
+        )
+        with self._lock:
+            self._last_sample = (features.tolist(), raw)
+
+        corrected = raw
+        if self._correction is not None:
+            try:
+                corrected = self._correction.apply(features, raw)
+            except ValueError as e:
+                logger.warning("Пост %s: поправка не применена (%s)", post.id, e)
+                self._correction = None
+
+        height_disp, width_disp, depth_disp = corrected
 
         self._set_frame("top", _draw_overlay(
             frame_top, contour_top, [f"Ширина: {width_disp:.0f} мм", f"Глубина: {depth_disp:.0f} мм"],
         ))
         self._set_frame("side", _draw_overlay(
-            frame_side, contour_side, [f"Высота: {height_disp:.0f} мм"], post.camera_side.floor_line_px,
+            frame_side, contour_side, [f"Высота: {height_disp:.0f} мм"],
+            int(floor_row) if floor_row is not None else post.camera_side.floor_line_px,
         ))
 
         stabilizer.add_sample(width_disp, depth_disp, height_disp)
@@ -246,10 +328,31 @@ class PostWorker:
         self._set_state(
             status=PostStatus.running, weight=weight, stable=is_stable,
             width_mm=width_disp, depth_mm=depth_disp, height_mm=height_disp, cross_check_passed=passed,
+            raw_width_mm=raw_width_disp, raw_depth_mm=raw_depth_disp, raw_height_mm=raw_height_disp,
+            correction_applied=self._correction is not None,
         )
 
         if is_stable:
             result = stabilizer.get_stable_result()
+
+            # Замер уходит в журнал независимо от того, настроен ли WMS: отправка наружу может
+            # быть не настроена или недоступна, а измерение всё равно уже сделано, и восстановить
+            # его потом неоткуда. Пишется стабилизировавшийся результат, один на паллету, а не
+            # каждый кадр.
+            try:
+                self._db.add_measurement(
+                    post.id, BACKEND_ORTHO,
+                    height_mm=result.height_mm, width_mm=result.length_mm, depth_mm=result.width_mm,
+                    raw=(raw_height_disp, raw_width_disp, raw_depth_disp),
+                    features=features.tolist(),
+                    weight_kg=weight.value if weight and weight.ok else None,
+                    cross_check_passed=passed,
+                    correction_applied=self._correction is not None,
+                    samples_count=result.samples_count,
+                )
+            except Exception as e:  # журнал не должен останавливать измерение
+                logger.error("Пост %s: замер не записан в журнал: %s", post.id, e)
+
             if post.wms_endpoint:
                 delta_mm = min(abs(width - side), abs(depth - side))
                 event = MeasurementEvent(
@@ -257,7 +360,10 @@ class PostWorker:
                     height_mm=result.height_mm, width_mm=result.length_mm, depth_mm=result.width_mm,
                     cross_check_passed=passed, cross_check_delta_mm=delta_mm, samples_count=result.samples_count,
                 )
-                send_measurement(event, post.wms_endpoint, pending_events_dir=f"data/posts/{post.id}/pending_events")
+                # Каталог очереди берётся от каталога точки, а не собирается от текущего рабочего:
+                # при запуске не из папки сервиса неотправленные события уходили бы мимо тома.
+                send_measurement(event, post.wms_endpoint,
+                                 pending_events_dir=str(self._post_dir / "pending_events"))
                 logger.info("Пост %s: измерение отправлено в WMS Ш=%.0f Г=%.0f В=%.0f",
                             post.id, result.length_mm, result.width_mm, result.height_mm)
             stabilizer.reset()
@@ -285,15 +391,17 @@ def _now() -> datetime:
 class PostWorkerRegistry:
     """Держит активные PostWorker по post_id — общий реестр для FastAPI-приложения."""
 
-    def __init__(self):
+    def __init__(self, database: Database, posts_dir: str | Path = "data/posts"):
         self._workers: dict[str, PostWorker] = {}
+        self._db = database
+        self._posts_dir = Path(posts_dir)
         self._lock = threading.Lock()
 
     def get_or_create(self, post: Post) -> PostWorker:
         with self._lock:
             worker = self._workers.get(post.id)
             if worker is None or worker.post != post:
-                worker = PostWorker(post)
+                worker = PostWorker(post, self._db, self._posts_dir)
                 self._workers[post.id] = worker
             return worker
 

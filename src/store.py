@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -39,7 +40,12 @@ class PostStore:
         return json.loads(self._path.read_text(encoding="utf-8") or "{}")
 
     def _write(self, data: dict[str, dict]) -> None:
-        self._path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        """Запись через временный файл: обрыв питания посреди неё оставлял обрезанный JSON,
+        и настройки всех точек пропадали разом. os.replace на одной файловой системе атомарен —
+        читатель видит либо старый файл целиком, либо новый."""
+        temporary = self._path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self._path)
 
     def list(self) -> list[Post]:
         with self._lock:

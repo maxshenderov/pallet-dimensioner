@@ -41,6 +41,28 @@
                 <div class="dim-tile"><div class="value" id="val-weight">—</div><div class="label">Вес</div></div>
             </div>
             <p id="cross-check-line" style="color:var(--text-secondary)"></p>
+            <p id="raw-line" style="color:var(--text-secondary)"></p>
+        </div>
+
+        <div class="content">
+            <h2 style="margin-top:0">Обучение поправки</h2>
+            <p style="color:var(--text-secondary)">
+                Поставь паллету, измерь её рулеткой, введи размеры и нажми «Запомнить». После
+                <strong id="train-recommended">40</strong> замеров поправка сама снимет систематику метода —
+                утопленный оптический центр, наклон верхней камеры, положение груза в стороне от центра.
+            </p>
+            <p id="train-status" style="color:var(--text-secondary)">—</p>
+            <p id="train-warning" style="color:#b3261e"></p>
+
+            <div style="display:flex; gap:.75rem; align-items:flex-end; flex-wrap:wrap;">
+                <label>Высота, мм<br><input id="true-height" type="number" min="1" step="1" style="width:8rem"></label>
+                <label>Ширина, мм<br><input id="true-width" type="number" min="1" step="1" style="width:8rem"></label>
+                <label>Глубина, мм<br><input id="true-depth" type="number" min="1" step="1" style="width:8rem"></label>
+                <button id="btn-remember" type="button">Запомнить</button>
+                <button id="btn-train" type="button">Обучить</button>
+                <button id="btn-clear" type="button">Сбросить выборку</button>
+            </div>
+            <p id="train-message" style="margin-top:.75rem"></p>
         </div>
 
         <div class="content" style="display:flex; gap:2rem; align-items:center; flex-wrap:wrap;">
@@ -85,6 +107,13 @@ async function poll() {
             ? ''
             : (s.cross_check_passed ? '✓ Кросс-проверка top/side пройдена' : '⚠ Расхождение top/side больше допуска');
 
+        // Сырое значение показываем рядом с исправленным: расхождение должно быть видно,
+        // а не проявляться молча где-то в WMS.
+        const raw = document.getElementById('raw-line');
+        raw.textContent = s.correction_applied && s.raw_height_mm !== null && s.raw_height_mm !== undefined
+            ? `До поправки: ${fmt(s.raw_height_mm)} × ${fmt(s.raw_width_mm)} × ${fmt(s.raw_depth_mm)} мм`
+            : '';
+
         if (s.stable) {
             document.getElementById('qr-img').src = `/posts/${postId}/qr.png?t=${Date.now()}`;
         }
@@ -94,6 +123,79 @@ async function poll() {
     }
 }
 
+function showTraining(t) {
+    document.getElementById('train-recommended').textContent = t.recommended_samples;
+    const parts = [`Размечено замеров: ${t.samples_count}`];
+    if (t.samples_count < t.minimum_samples) {
+        parts.push(`до обучения нужно ещё ${t.minimum_samples - t.samples_count}`);
+    }
+    if (t.trained) {
+        parts.push(`поправка обучена на ${t.trained_on_samples}`);
+        parts.push(t.expected_error_mm
+            ? `ожидаемая ошибка ${t.expected_error_mm.map(Math.round).join(' / ')} мм (В/Ш/Г)`
+            : 'замеров пока мало для оценки качества');
+    } else {
+        parts.push('поправка не обучена');
+    }
+    document.getElementById('train-status').textContent = parts.join(' · ');
+
+    // Однообразная выборка — единственная беда, которую оценка по отложенным замерам не видит:
+    // отложенные там такие же, и ошибка выходит красивой при негодной поправке.
+    const warn = document.getElementById('train-warning');
+    warn.textContent = t.warning ? `⚠ ${t.warning}` : '';
+}
+
+function say(text, ok) {
+    const el = document.getElementById('train-message');
+    el.textContent = text;
+    el.style.color = ok ? 'var(--text-secondary)' : '#b3261e';
+}
+
+async function callTraining(method, body) {
+    const res = await fetch(`/api/posts/${postId}/training${method === 'FIT' ? '/fit' : ''}`, {
+        method: method === 'FIT' ? 'POST' : method,
+        headers: body ? {'Content-Type': 'application/json'} : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'ошибка');
+    showTraining(data);
+    return data;
+}
+
+document.getElementById('btn-remember').onclick = async () => {
+    const body = {
+        height_mm: Number(document.getElementById('true-height').value),
+        width_mm: Number(document.getElementById('true-width').value),
+        depth_mm: Number(document.getElementById('true-depth').value),
+    };
+    if (!(body.height_mm > 0 && body.width_mm > 0 && body.depth_mm > 0)) {
+        return say('Введи все три размера', false);
+    }
+    try {
+        const t = await callTraining('POST', body);
+        say(`Замер запомнен, всего ${t.samples_count}`, true);
+    } catch (e) { say(e.message, false); }
+};
+
+document.getElementById('btn-train').onclick = async () => {
+    try {
+        const t = await callTraining('FIT');
+        say(t.expected_error_mm
+            ? `Обучено на ${t.trained_on_samples} замерах, ожидаемая ошибка ${t.expected_error_mm.map(Math.round).join(' / ')} мм`
+            : `Обучено на ${t.trained_on_samples} замерах`, true);
+    } catch (e) { say(e.message, false); }
+};
+
+document.getElementById('btn-clear').onclick = async () => {
+    if (!confirm('Удалить все размеченные замеры и обученную поправку?')) return;
+    try {
+        await callTraining('DELETE');
+        say('Выборка сброшена', true);
+    } catch (e) { say(e.message, false); }
+};
+
+callTraining('GET').catch(() => {});
 poll();
 setInterval(poll, 700);
 </script>
